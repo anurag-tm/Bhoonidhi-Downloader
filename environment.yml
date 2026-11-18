@@ -1,0 +1,16 @@
+name: bhoonidhi
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - streamlit>=1.36
+  - requests
+  - pandas
+  - numpy
+  - pillow
+  - pydeck
+  - geopandas
+  - shapely>=2
+  - pyproj
+  - gdal
+  - keyring

@@ -1,0 +1,13 @@
+# For pip users. Conda (environment.yml) is easier on Windows because it installs GDAL for you.
+# With pip, GDAL is optional: without it everything works except "Unzip and clip".
+streamlit>=1.36
+requests
+pandas
+numpy
+pillow
+pydeck
+geopandas
+shapely>=2
+pyproj
+keyring
+# gdal   # install separately (conda install -c conda-forge gdal) to enable clipping

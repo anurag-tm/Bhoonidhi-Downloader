@@ -1,0 +1,15 @@
+# downloads and app data (never commit satellite data or personal settings)
+liss4_downloads/
+*.part
+_downloaded.json
+bhoonidhi_settings.json
+*.zip
+*.tif
+*.tiff
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/

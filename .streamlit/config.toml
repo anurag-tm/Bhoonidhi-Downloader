@@ -1,0 +1,8 @@
+[client]
+toolbarMode = "minimal"      # hide Streamlit's "Deploy" button
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#1f6feb"
