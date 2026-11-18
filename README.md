@@ -20,7 +20,7 @@ You pick an area and dates, the app finds the scenes, shows you quick-look previ
 - **Fast downloads.** 1–5 scenes at the same time (default 4), with automatic retry and **resume** if the internet drops.
 - **Unzip + clip with GDAL.** Every band is clipped to your area, with an optional stacked GeoTIFF.
 - **Stays logged in.** The token is refreshed every 18 min (also while idle), page reloads keep you logged in, and an optional "Remember me on this PC" setting logs you in when the app starts.
-- **Remembers your settings** (download folder, clip options, parallel downloads).
+- **Never lose your work.** Your last shapefile, area, dates, filters and search results come back automatically after the PC sleeps, the browser disconnects or the app restarts. Download settings are remembered too.
 
 ---
 
@@ -152,6 +152,7 @@ Untick *"Keep full scene after clipping"* to save disk space; only the clipped f
 | *Remember me* is greyed out | `conda install -c conda-forge keyring`, then restart the app. |
 | Streamlit asks for an email | Press **Enter** (leave it blank). |
 | Logged out after a reload | Update to the latest version. Login now survives page reloads. |
+| Page reset, shapefile gone | Update to the latest version and start the app with `run_windows.bat` (or from the app folder). Your last area and results now come back by themselves. |
 
 Still stuck? Open an issue: <https://github.com/anurag-tm/Bhoonidhi-Downloader/issues>
 
@@ -167,7 +168,7 @@ Download the new ZIP (or run `git pull`), replace the old files, then run `insta
 
 - Your password is kept only in the app's memory while it runs.
 - With *"Remember me on this PC"* it is saved in **Windows Credential Manager** (or the macOS Keychain), never in a text file. *"Logout and forget me on this PC"* removes it.
-- `bhoonidhi_settings.json` stores only the download folder and options, never your password.
+- `bhoonidhi_settings.json` (options), `bhoonidhi_last_aoi.json` (your last uploaded area) and `bhoonidhi_last_search.json` (last results) are saved in the app folder on your PC. They never contain your password and are never uploaded anywhere. Delete them to start fresh.
 - The app talks only to Bhoonidhi (`bhoonidhi.nrsc.gov.in`) and loads the basemap for the Compare window.
 
 ---

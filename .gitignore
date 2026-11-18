@@ -13,3 +13,6 @@ __pycache__/
 .venv/
 venv/
 .ipynb_checkpoints/
+bhoonidhi_last_aoi.json
+bhoonidhi_last_search.json
+*.tmp

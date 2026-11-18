@@ -1,6 +1,10 @@
 [client]
 toolbarMode = "minimal"      # hide Streamlit's "Deploy" button
 
+[server]
+disconnectedSessionTTL = 86400   # keep your page (uploads, results) for 24 h if the connection drops
+websocketPingInterval = 30       # keep the connection alive while the tab is idle
+
 [browser]
 gatherUsageStats = false
 

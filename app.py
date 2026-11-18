@@ -106,6 +106,48 @@ def save_settings(**kw):
 
 CFG = load_settings()
 
+# Last area + last search are saved next to the app, so a dropped browser connection,
+# PC sleep or app restart does not lose them.
+APP_DIR = os.path.dirname(SETTINGS_FILE)
+LAST_AOI_FILE = os.path.join(APP_DIR, "bhoonidhi_last_aoi.json")
+LAST_SEARCH_FILE = os.path.join(APP_DIR, "bhoonidhi_last_search.json")
+
+
+def _save_json(path, obj):
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(obj, fh)
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _load_json(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _cfg_date(key, default):
+    try:
+        d = date.fromisoformat(CFG[key])
+        return min(max(d, date(2011, 1, 1)), date.today())
+    except (KeyError, TypeError, ValueError):
+        return default
+
+
+# restore the last search when a new page session starts
+if not ss.feats and "restored_search" not in ss:
+    ss.restored_search = None
+    _last = _load_json(LAST_SEARCH_FILE)
+    if _last and _last.get("feats") and _last.get("aoi"):
+        ss.feats = _last["feats"]
+        ss.aoi = (_last["aoi"][0], tuple(_last["aoi"][1]))
+        ss.restored_search = _last.get("time", "")
+
 
 # ---------------- Auth ----------------
 def err_text(r):
@@ -960,7 +1002,7 @@ def show_map(aoi_geom, feats, bounds):
 
 
 # ================= UI =================
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 REPO_URL = "https://github.com/anurag-tm/Bhoonidhi-Downloader"
 st.title("🛰️ Bhoonidhi Downloader")
 st.caption(f"Search, preview, download and clip Resourcesat LISS-IV data from NRSC Bhoonidhi · "
@@ -1012,14 +1054,19 @@ with st.sidebar:
 
 # --- AOI ---
 st.subheader("1. Area of interest")
-mode = st.radio("Define AOI by", ["Point + size", "Bounding box", "Shapefile"], horizontal=True)
+_modes = ["Point + size", "Bounding box", "Shapefile"]
+mode = st.radio("Define AOI by", _modes, horizontal=True,
+                index=_modes.index(CFG.get("aoi_mode")) if CFG.get("aoi_mode") in _modes else 0)
 aoi_geom, aoi_bounds = None, None
 if mode == "Point + size":
     c1, c2, c3 = st.columns([3, 1, 1])
-    txt = c1.text_input("Latitude, Longitude", value="34.1667, 77.5833")
-    shp_kind = c2.radio("Clip shape", ["Circle", "Square"], horizontal=True)
+    txt = c1.text_input("Latitude, Longitude", value=CFG.get("latlon", "34.1667, 77.5833"))
+    shp_kind = c2.radio("Clip shape", ["Circle", "Square"], horizontal=True,
+                        index=1 if CFG.get("clip_shape") == "Square" else 0)
     size_lbl = "Radius (km)" if shp_kind == "Circle" else "Side length (km)"
-    rad = c3.number_input(size_lbl, min_value=0.5, max_value=400.0, value=20.0, step=1.0)
+    rad = c3.number_input(size_lbl, min_value=0.5, max_value=400.0,
+                          value=float(CFG.get("clip_size", 20.0)), step=1.0)
+    save_settings(latlon=txt, clip_shape=shp_kind, clip_size=float(rad))
     area = 3.141593 * rad ** 2 if shp_kind == "Circle" else rad ** 2
     st.caption(f"Clip area: about {area:,.0f} km²"
                + (f" (circle, {2 * rad:g} km across)" if shp_kind == "Circle"
@@ -1036,10 +1083,12 @@ if mode == "Point + size":
         st.error("Enter latitude first, then longitude, e.g. 28.1722, 89.8478")
 elif mode == "Bounding box":
     c1, c2, c3, c4 = st.columns(4)
-    x0 = c1.number_input("Min longitude", value=76.0, format="%.5f")
-    y0 = c2.number_input("Min latitude", value=33.5, format="%.5f")
-    x1 = c3.number_input("Max longitude", value=76.6, format="%.5f")
-    y1 = c4.number_input("Max latitude", value=34.0, format="%.5f")
+    _bb = CFG.get("bbox") or [76.0, 33.5, 76.6, 34.0]
+    x0 = c1.number_input("Min longitude", value=float(_bb[0]), format="%.5f")
+    y0 = c2.number_input("Min latitude", value=float(_bb[1]), format="%.5f")
+    x1 = c3.number_input("Max longitude", value=float(_bb[2]), format="%.5f")
+    y1 = c4.number_input("Max latitude", value=float(_bb[3]), format="%.5f")
+    save_settings(bbox=[x0, y0, x1, y1])
     if x0 >= x1 or y0 >= y1:
         st.error("Min values must be smaller than max values.")
     else:
@@ -1050,36 +1099,60 @@ else:
                           "(GeoJSON / GPKG also work)",
                           type=["zip", "shp", "shx", "dbf", "prj", "cpg", "geojson", "json", "gpkg"],
                           accept_multiple_files=True)
+    last_aoi = _load_json(LAST_AOI_FILE)
     if up:
         try:
             aoi_geom, aoi_bounds, note = read_shapefile(up)
             if note:
                 st.warning(note)
             st.success("AOI bounds: " + ", ".join(f"{v:.4f}" for v in aoi_bounds))
+            name = ", ".join(f.name for f in up)
+            if not last_aoi or last_aoi.get("geometry") != aoi_geom:
+                _save_json(LAST_AOI_FILE, {"name": name, "geometry": aoi_geom,
+                                           "bounds": list(aoi_bounds)})
         except ImportError:
             st.error("geopandas not installed. Run: conda install -c conda-forge geopandas")
         except Exception as e:
             st.error(f"Could not read file: {e}")
+    elif last_aoi and last_aoi.get("geometry"):
+        aoi_geom, aoi_bounds = last_aoi["geometry"], tuple(last_aoi["bounds"])
+        c1, c2 = st.columns([4, 1])
+        c1.info(f"Using your last shapefile: **{last_aoi.get('name', 'saved area')}** "
+                f"(bounds {', '.join(f'{v:.4f}' for v in aoi_bounds)}). "
+                "Upload another file to replace it.")
+        if c2.button("Forget it"):
+            try:
+                os.remove(LAST_AOI_FILE)
+            except OSError:
+                pass
+            st.rerun()
+save_settings(aoi_mode=mode)
 
 # --- Filters ---
 st.subheader("2. Filters")
 c1, c2, c3 = st.columns([1, 1, 2])
-d_start = c1.date_input("Start date", value=date(2023, 7, 1), key="d_start",
+d_start = c1.date_input("Start date", value=_cfg_date("d_start", date(2023, 7, 1)), key="d_start",
                         min_value=date(2011, 1, 1), max_value=date.today(), format="DD/MM/YYYY")
-d_end = c2.date_input("End date", value=date(2023, 10, 31), key="d_end",
+d_end = c2.date_input("End date", value=_cfg_date("d_end", date(2023, 10, 31)), key="d_end",
                       min_value=date(2011, 1, 1), max_value=date.today(), format="DD/MM/YYYY")
 dates_ok = d_start <= d_end
 if not dates_ok:
     st.error("Start date must be on or before the end date.")
-cols = c3.multiselect("Collections", COLLECTIONS, default=DEFAULT_COLS)
+cols = c3.multiselect("Collections", COLLECTIONS,
+                      default=[c for c in CFG.get("collections", DEFAULT_COLS) if c in COLLECTIONS])
 c1, c2 = st.columns(2)
-max_cloud = c1.slider("Max cloud cover (%)", 0, 100, 20)
-keep_unknown = c2.checkbox("Keep scenes with no cloud value", value=True)
-online_only = c2.checkbox("Online scenes only (API can only download these)", value=True)
+max_cloud = c1.slider("Max cloud cover (%)", 0, 100, int(CFG.get("max_cloud", 20)))
+keep_unknown = c2.checkbox("Keep scenes with no cloud value", value=CFG.get("keep_unknown", True))
+online_only = c2.checkbox("Online scenes only (API can only download these)",
+                          value=CFG.get("online_only", True))
 get_cloud_info = c1.checkbox("Read cloud cover for each scene (.meta file, else quick-look estimate)",
-                             value=True, help="Bhoonidhi's search results have no cloud field, so the "
+                             value=CFG.get("read_cloud", True), help="Bhoonidhi's search results have no cloud field, so the "
                              "app reads each scene's .meta file. If that has no cloud value, it "
                              "estimates from the quick-look (counts snow too).")
+
+save_settings(d_start=d_start.isoformat(), d_end=d_end.isoformat(), collections=cols,
+              max_cloud=int(max_cloud), keep_unknown=bool(keep_unknown),
+              online_only=bool(online_only), read_cloud=bool(get_cloud_info))
 
 ready = AUTH.token and aoi_geom and dates_ok and cols
 if st.button("🔍 Search", type="primary", disabled=not ready):
@@ -1129,6 +1202,9 @@ if st.button("🔍 Search", type="primary", disabled=not ready):
         cprog.empty()
     ss.feats = feats
     ss.aoi = (aoi_geom, aoi_bounds)
+    ss.restored_search = None
+    _save_json(LAST_SEARCH_FILE, {"time": time.strftime("%d/%m/%Y %H:%M"), "feats": feats,
+                                  "aoi": [aoi_geom, list(aoi_bounds)]})
     if failed:
         st.error("Some periods could not be searched:\n\n" + "\n\n".join(failed))
     if len(chunks) > 1:
@@ -1139,6 +1215,9 @@ if st.button("🔍 Search", type="primary", disabled=not ready):
                    "or untick 'Online scenes only'.")
 if not AUTH.token:
     st.info("Log in from the sidebar to search.")
+if ss.feats and ss.get("restored_search"):
+    st.caption(f"↩️ Showing your last search from {ss.restored_search} (restored automatically). "
+               "Click Search to refresh it.")
 
 # --- Results ---
 if ss.feats:
