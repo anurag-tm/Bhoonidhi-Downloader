@@ -562,12 +562,18 @@ def save_index(out_dir, scene_id, path):
 
 
 def find_existing(out_dir, scene_id):
+    """Downloaded ZIP, or its unzipped folder if the ZIP was deleted after extraction."""
     p = load_index(out_dir).get(scene_id)
-    if p and os.path.isfile(p):
+    if p and os.path.exists(p):
         return p
-    for p in glob.glob(os.path.join(out_dir, scene_id + "*")):
-        if os.path.isfile(p) and not p.endswith(".part"):
-            return p
+    hits = [h for h in glob.glob(os.path.join(out_dir, scene_id + "*"))
+            if not h.endswith((".part", ".tmp"))]
+    for h in hits:                                   # the ZIP itself first
+        if os.path.isfile(h):
+            return h
+    for h in sorted(hits, key=lambda x: x.endswith("_clip")):   # unzipped folder, then clip folder
+        if os.path.isdir(h):
+            return h
     return None
 
 
@@ -660,65 +666,164 @@ class _Sink:
         self.d[self.k]["msg"] = str(msg)
 
 
-def _job(item, out_dir, do_clip, do_stack, keep_full, aoi_geom, state):
+def _dl_job(item, out_dir, state):
     sid = item["id"]
     sink = _Sink(state, sid)
     state[sid]["status"] = "downloading"
     ok, msg, path = download_item(item, out_dir, sink, sink)
-    clip_msg = ""
-    if ok and do_clip:
-        state[sid]["status"] = "clipping"
-        sink.write(f"{sid}: clipping...")
-        try:
-            clip_msg = clip_product(path, aoi_geom, do_stack, keep_full)
-        except Exception as e:
-            clip_msg = f"Clip failed: {e}"
-    state[sid].update(status="done" if ok else "failed", pct=1.0 if ok else state[sid]["pct"],
-                      msg=msg + (f" | {clip_msg}" if clip_msg else ""), dl=msg, clip=clip_msg)
+    state[sid].update(status="downloaded" if ok else "failed", dl=msg, path=path,
+                      pct=1.0 if ok else state[sid]["pct"], msg=msg)
 
 
-def run_downloads(items, out_dir, n_par, do_clip, do_stack, keep_full, aoi_geom):
-    """Download (and clip) scenes, n_par at a time, with live progress for each."""
+def _proc_job(key, path, aoi_geom, opts, state):
+    state[key].update(status="processing", msg="unzipping / processing...")
+    try:
+        rep = process_product(path, aoi_geom, **opts)
+        state[key].update(status="done", proc=rep, msg=rep)
+    except Exception as e:
+        state[key].update(status="failed", proc=f"Processing failed: {e}",
+                          msg=f"Processing failed: {e}")
+
+
+def _live_table(rows, state, icon, overall, phase, total, futs):
+    while True:
+        for k, (head, bar, line) in rows.items():
+            s_ = state[k]
+            head.markdown(f"{icon[s_['status']]} `{k}`")
+            bar.progress(min(max(s_["pct"], 0.0), 1.0))
+            line.caption(s_["msg"])
+        fin = sum(fu.done() for fu in futs)
+        overall.progress(fin / max(total, 1), text=f"{phase}: {fin}/{total} finished")
+        if all(fu.done() for fu in futs):
+            break
+        time.sleep(0.7)
+    for fu in futs:
+        if fu.exception():
+            st.error(f"Unexpected error: {fu.exception()}")
+
+
+ICONS = {"waiting": "⏳", "downloading": "⬇️", "downloaded": "📦", "processing": "⚙️",
+         "done": "✅", "failed": "❌"}
+
+
+def run_downloads(items, out_dir, n_par, opts, aoi_geom):
+    """Step 1: download all scenes (n_par at a time). Step 2: after ALL downloads finish,
+    unzip / clip / make composites (2 at a time). opts=None -> download only."""
     from concurrent.futures import ThreadPoolExecutor
     os.makedirs(out_dir, exist_ok=True)
-    state = {f["id"]: {"status": "waiting", "pct": 0.0, "msg": "waiting...", "dl": "", "clip": ""}
-             for f in items}
+    state = {f["id"]: {"status": "waiting", "pct": 0.0, "msg": "waiting...", "dl": "",
+                       "proc": "", "path": None} for f in items}
     overall = st.progress(0.0, text="Starting...")
     rows = {}
     for f in items:
         c1, c2 = st.columns([1, 3])
         rows[f["id"]] = (c1.empty(), c2.progress(0.0), c2.empty())
-    icon = {"waiting": "⏳", "downloading": "⬇️", "clipping": "✂️", "done": "✅", "failed": "❌"}
     with ThreadPoolExecutor(max_workers=max(1, min(5, n_par))) as ex:
-        futs = [ex.submit(_job, f, out_dir, do_clip, do_stack, keep_full, aoi_geom, state)
-                for f in items]
-        while True:
-            for sid, (head, bar, line) in rows.items():
-                s_ = state[sid]
-                head.markdown(f"{icon[s_['status']]} `{sid}`")
-                bar.progress(min(max(s_["pct"], 0.0), 1.0))
-                line.caption(s_["msg"])
-            done = sum(s_["status"] in ("done", "failed") for s_ in state.values())
-            active = sum(s_["status"] in ("downloading", "clipping") for s_ in state.values())
-            overall.progress(done / len(items),
-                             text=f"{done}/{len(items)} finished, {active} running")
-            if all(fu.done() for fu in futs):
-                break
-            time.sleep(0.7)
-        for fu in futs:
-            exc = fu.exception()
-            if exc:
-                st.error(f"Unexpected error: {exc}")
-    for sid, (head, bar, line) in rows.items():
-        s_ = state[sid]
-        head.markdown(f"{icon[s_['status']]} `{sid}`")
-        bar.progress(min(max(s_["pct"], 0.0), 1.0))
-        line.caption(s_["msg"])
-    n_ok = sum(s_["status"] == "done" for s_ in state.values())
+        futs = [ex.submit(_dl_job, f, out_dir, state) for f in items]
+        _live_table(rows, state, ICONS, overall, "Step 1 - downloading", len(items), futs)
+    todo = [k for k, v in state.items() if v["status"] == "downloaded"]
+    if opts and todo:
+        with ThreadPoolExecutor(max_workers=2) as ex:      # GDAL work is disk/CPU heavy
+            futs = [ex.submit(_proc_job, k, state[k]["path"], aoi_geom, opts, state) for k in todo]
+            _live_table(rows, state, ICONS, overall, "Step 2 - unzip / clip / composites",
+                        len(todo), futs)
+    else:
+        for k in todo:
+            state[k]["status"] = "done"
+        _live_table(rows, state, ICONS, overall, "Done", 1, [])
+    n_ok = sum(v["status"] == "done" for v in state.values())
     (st.success if n_ok == len(items) else st.warning)(
         f"Done: {n_ok} of {len(items)} scene(s) finished."
         + ("" if n_ok == len(items) else " Click Download again to resume the failed ones."))
-    st.dataframe(pd.DataFrame([{"ID": k, "Result": v["status"], "Download": v["dl"], "Clip": v["clip"]}
+    st.dataframe(pd.DataFrame([{"ID": k, "Result": v["status"], "Download": v["dl"],
+                                "Processing": v["proc"]} for k, v in state.items()]),
+                 hide_index=True, use_container_width=True)
+
+
+def processing_options(key, has_gdal, aoi_ok=True):
+    """'After download' choices. Returns options for process_product, or None = keep ZIP only."""
+    if not has_gdal:
+        st.caption("Unzip / clip / composites need GDAL: conda install -c conda-forge gdal "
+                   "(then restart the app). Downloads still work.")
+        return None
+    def g(name, default):            # each section remembers its own choices
+        return CFG.get(f"{key}_{name}", CFG.get(name, default))
+
+    c1, c2, c3 = st.columns(3)
+    unzip = c1.checkbox("Unzip after download", value=g("unzip", True), key=f"{key}_unzip",
+                        help="Off = only the ZIP is saved, nothing else is done.")
+    clip = c2.checkbox("Clip to my AOI", value=g("clip", True) and aoi_ok, key=f"{key}_clip",
+                       disabled=not unzip or not aoi_ok,
+                       help="Off = work on the full scene (no clipping).")
+    stack = c3.checkbox("Stack bands into one GeoTIFF", value=g("stack", True),
+                        key=f"{key}_stack", disabled=not (unzip and clip))
+    c1, c2, c3 = st.columns(3)
+    fcc = c1.checkbox("Make FCC (false colour)", value=g("fcc", False), key=f"{key}_fcc",
+                      disabled=not unzip, help=COMPOSITES["FCC"])
+    tcc = c2.checkbox("Make TCC (true colour)", value=g("tcc", False), key=f"{key}_tcc",
+                      disabled=not unzip, help=COMPOSITES["TCC"])
+    zip_choice = c3.radio("After unzipping, the ZIP file", ["Keep", "Delete"], horizontal=True,
+                          index=0 if g("keep_zip", True) else 1, key=f"{key}_zip",
+                          disabled=not unzip)
+    keep_full = st.checkbox("Keep the unzipped full scene after clipping (untick to save disk space)",
+                            value=g("keep_full", True), key=f"{key}_full",
+                            disabled=not (unzip and clip))
+    vals = {"unzip": bool(unzip), "stack": bool(stack), "fcc": bool(fcc), "tcc": bool(tcc),
+            "keep_zip": zip_choice == "Keep", "keep_full": bool(keep_full)}
+    if aoi_ok:
+        vals["clip"] = bool(clip)
+    save_settings(**{f"{key}_{k}": v for k, v in vals.items()})
+    if not unzip:
+        return None
+    comps = [k for k, on in (("FCC", fcc), ("TCC", tcc)) if on]
+    if fcc or tcc:
+        st.caption("FCC = NIR-Red-Green (B4-B3-B2). TCC = simulated true colour: LISS-IV has no blue "
+                   "band, so R = Red, G = (3·Green + NIR)/4, B = (3·Green − NIR)/4.")
+    return {"clip": bool(clip and aoi_ok), "stack": bool(stack and clip), "composites": comps,
+            "keep_zip": zip_choice == "Keep", "keep_full": bool(keep_full) or not clip}
+
+
+def run_folder_processing(folder, opts, aoi_geom):
+    """Process ZIPs that are already on the PC (like a batch script), skipping done ones."""
+    from concurrent.futures import ThreadPoolExecutor
+    zips = sorted(f for f in os.listdir(folder) if f.lower().endswith((".zip", ".tar.gz", ".tgz")))
+    if not zips:
+        st.warning("No ZIP files found in this folder.")
+        return
+    done_log = os.path.join(folder, "_processed.json")
+    try:
+        with open(done_log) as fh:
+            done = json.load(fh)
+    except (OSError, ValueError):
+        done = {}
+    sig = json.dumps(opts, sort_keys=True) + json.dumps(aoi_geom if opts.get("clip") else None)
+    todo = [z for z in zips if done.get(z) != sig]
+    if len(todo) < len(zips):
+        st.caption(f"Skipping {len(zips) - len(todo)} ZIP(s) already processed with these settings.")
+    if not todo:
+        st.success("All ZIPs here are already processed with these settings.")
+        return
+    state = {z: {"status": "waiting", "pct": 0.0, "msg": "waiting...", "proc": ""} for z in todo}
+    overall = st.progress(0.0, text="Starting...")
+    rows = {}
+    for z in todo:
+        c1, c2 = st.columns([1, 3])
+        rows[z] = (c1.empty(), c2.progress(0.0), c2.empty())
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(_proc_job, z, os.path.join(folder, z), aoi_geom, opts, state)
+                for z in todo]
+        _live_table(rows, state, ICONS, overall, "Processing", len(todo), futs)
+    for z in todo:
+        if state[z]["status"] == "done":
+            done[z] = sig
+    try:
+        with open(done_log, "w") as fh:
+            json.dump(done, fh, indent=1)
+    except OSError:
+        pass
+    n_ok = sum(v["status"] == "done" for v in state.values())
+    (st.success if n_ok == len(todo) else st.warning)(f"Processed {n_ok} of {len(todo)} ZIP(s).")
+    st.dataframe(pd.DataFrame([{"ZIP": k, "Result": v["status"], "Details": v["proc"]}
                                for k, v in state.items()]), hide_index=True, use_container_width=True)
 
 
@@ -731,67 +836,197 @@ def gdal_available():
         return False
 
 
-def clip_product(path, aoi_geom, stack, keep_full):
-    """Unzip product, clip every band GeoTIFF to the AOI, optionally stack. Returns message."""
+BAND_RE = re.compile(r"(?:BAND[_\s-]?|(?<![A-Z0-9])B)0?([1-5])(?![0-9])", re.I)
+# LISS-IV / LISS-III band numbers: 2 = Green, 3 = Red, 4 = NIR (LISS-III also has 5 = SWIR)
+COMPOSITES = {
+    "FCC": "False colour (NIR-Red-Green): vegetation red, water dark, snow white",
+    "TCC": "Simulated true colour: R = Red, G = (3*Green + NIR)/4, B = (3*Green - NIR)/4",
+}
+
+
+def find_bands(rasters):
+    """{2: path, 3: path, 4: path} from file names like BAND2.tif / ..._B3.tif."""
+    out = {}
+    for r in rasters:
+        name = os.path.basename(r).upper()
+        if name.endswith((".OVR", ".AUX.XML")):
+            continue
+        m = BAND_RE.search(os.path.splitext(name)[0])
+        if m:
+            out.setdefault(int(m.group(1)), r)
+    return out
+
+
+def make_composite(bands, out_path, kind, block_rows=1024):
+    """Write an 8-bit RGB GeoTIFF (FCC or simulated TCC) from bands {2,3,4}.
+    Reads in blocks, so full 70 km LISS-IV scenes do not run out of memory.
+    2-98 % stretch per channel; 0 = no data."""
+    import numpy as np
     from osgeo import gdal
     gdal.UseExceptions()
+    ds = {k: gdal.Open(bands[k]) for k in (2, 3, 4)}
+    xs, ys = ds[2].RasterXSize, ds[2].RasterYSize
+    if any((d.RasterXSize, d.RasterYSize) != (xs, ys) for d in ds.values()):
+        # bands differ in size -> put them on band 2's grid through a VRT
+        vrt = gdal.BuildVRT("", [bands[2], bands[3], bands[4]], separate=True,
+                            resolution="highest")
+        ds = {k: _BandView(vrt, i + 1) for i, k in enumerate((2, 3, 4))}
+        xs, ys = vrt.RasterXSize, vrt.RasterYSize
+        ref = vrt
+    else:
+        ref = ds[2]
+
+    def channels(g, r, n):
+        if kind == "FCC":
+            return n, r, g
+        return r, (3 * g + n) / 4.0, (3 * g - n) / 4.0          # simulated true colour
+
+    def read(k, yoff, rows, bx=None, by=None):
+        b = ds[k].GetRasterBand(1)
+        if bx:
+            return b.ReadAsArray(0, 0, xs, ys, buf_xsize=bx, buf_ysize=by).astype("float32")
+        return b.ReadAsArray(0, yoff, xs, rows).astype("float32")
+
+    # stretch limits from a reduced copy (fast, low memory)
+    f = max(1.0, max(xs, ys) / 2000.0)
+    bx, by = max(1, int(xs / f)), max(1, int(ys / f))
+    g, r, n = (read(k, 0, 0, bx, by) for k in (2, 3, 4))
+    valid = (g > 0) & (r > 0) & (n > 0)
+    if valid.sum() < 50:
+        raise RuntimeError("no valid pixels")
+    lims = [(float(np.percentile(c[valid], 2)), float(np.percentile(c[valid], 98)))
+            for c in channels(g, r, n)]
+
+    drv = gdal.GetDriverByName("GTiff")
+    out = drv.Create(out_path, xs, ys, 3, gdal.GDT_Byte,
+                     ["COMPRESS=DEFLATE", "TILED=YES", "PHOTOMETRIC=RGB", "BIGTIFF=IF_SAFER"])
+    out.SetGeoTransform(ref.GetGeoTransform())
+    out.SetProjection(ref.GetProjection())
+    for i in range(3):
+        out.GetRasterBand(i + 1).SetNoDataValue(0)
+    for y in range(0, ys, block_rows):
+        rows = min(block_rows, ys - y)
+        g, r, n = (read(k, y, rows) for k in (2, 3, 4))
+        valid = (g > 0) & (r > 0) & (n > 0)
+        for i, (c, (lo, hi)) in enumerate(zip(channels(g, r, n), lims)):
+            v = np.clip((c - lo) / max(hi - lo, 1e-6) * 254 + 1, 1, 255)   # 1..255, 0 = no data
+            v[~valid] = 0
+            out.GetRasterBand(i + 1).WriteArray(v.astype("uint8"), 0, y)
+    out.BuildOverviews("AVERAGE", [2, 4, 8, 16])
+    out.FlushCache()
+    out = None
+    return out_path
+
+
+class _BandView:
+    """Makes one band of a multi-band VRT look like a single-band dataset."""
+    def __init__(self, ds, idx):
+        self.ds, self.idx = ds, idx
+
+    def GetRasterBand(self, _):
+        return self.ds.GetRasterBand(self.idx)
+
+
+def process_product(path, aoi_geom, clip=True, stack=True, composites=(), keep_zip=True,
+                    keep_full=True):
+    """After download: unzip -> (clip to AOI) -> (stack) -> (FCC / TCC) -> tidy up.
+    Returns a short report."""
+    from osgeo import gdal
+    gdal.UseExceptions()
+    co = ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=IF_SAFER"]
+    report = []
 
     folder = os.path.dirname(path)
     base = re.sub(r"\.(zip|tar\.gz|tgz|tar)$", "", os.path.basename(path), flags=re.I)
-    ex_dir = os.path.join(folder, base)
-    unpacked = False
-    if os.path.isfile(path) and path.lower().endswith(RASTER_EXT):
+    ex_dir = path if os.path.isdir(path) else os.path.join(folder, base)
+    is_archive = os.path.isfile(path) and not path.lower().endswith(RASTER_EXT)
+
+    # 1) unzip
+    if path.lower().endswith(RASTER_EXT):
         rasters = [path]
     else:
-        if not os.path.isdir(ex_dir):
+        if is_archive and not os.path.isdir(ex_dir):
             shutil.unpack_archive(path, ex_dir)
-        unpacked = True
+            report.append(f"Unzipped -> {ex_dir}")
         rasters = sorted(os.path.join(r, n) for r, _, fs in os.walk(ex_dir) for n in fs
                          if n.lower().endswith(RASTER_EXT))
     if not rasters:
         return "No GeoTIFF bands found inside the product."
+    bands = find_bands(rasters)
+    work = dict(bands) if bands else {i: r for i, r in enumerate(rasters, 1)}
 
-    clip_dir = os.path.join(folder, base + "_clip")
-    os.makedirs(clip_dir, exist_ok=True)
-    cut = os.path.join(clip_dir, "aoi.geojson")
-    with open(cut, "w") as fh:
-        json.dump({"type": "FeatureCollection", "features": [
-            {"type": "Feature", "properties": {}, "geometry": aoi_geom}]}, fh)
-
-    outs, skipped = [], []
-    co = ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=IF_SAFER"]
-    for src in rasters:
-        out = os.path.join(clip_dir, os.path.splitext(os.path.basename(src))[0] + "_clip.tif")
-        try:
-            ds = gdal.Warp(out, src, cutlineDSName=cut, cropToCutline=True,
-                           dstNodata=0, creationOptions=co)
-            ds.GetRasterBand(1).ComputeRasterMinMax(False)  # raises if no valid pixel (no overlap)
+    # 2) clip
+    out_dir = os.path.join(folder, base + "_clip") if clip else folder
+    if clip:
+        os.makedirs(out_dir, exist_ok=True)
+        cut = os.path.join(out_dir, "aoi.geojson")
+        with open(cut, "w") as fh:
+            json.dump({"type": "FeatureCollection", "features": [
+                {"type": "Feature", "properties": {}, "geometry": aoi_geom}]}, fh)
+        clipped, skipped = {}, []
+        for k, src in sorted(work.items()):
+            out = os.path.join(out_dir, os.path.splitext(os.path.basename(src))[0] + "_clip.tif")
             ds = None
-            outs.append(out)
-        except RuntimeError:
-            ds = None                                # release file (Windows locks it)
-            skipped.append(os.path.basename(src))   # AOI does not overlap this band/scene
-            if os.path.exists(out):
-                os.remove(out)
+            try:
+                ds = gdal.Warp(out, src, cutlineDSName=cut, cropToCutline=True,
+                               dstNodata=0, creationOptions=co)
+                ds.GetRasterBand(1).ComputeRasterMinMax(False)   # raises if AOI misses the band
+                ds = None
+                clipped[k] = out
+            except RuntimeError:
+                ds = None                                        # release file (Windows locks it)
+                skipped.append(os.path.basename(src))
+                if os.path.exists(out):
+                    os.remove(out)
+        work = clipped
+        report.append(f"Clipped {len(clipped)} band(s) -> {out_dir}"
+                      + (f" (no overlap: {', '.join(skipped)})" if skipped else ""))
+        if stack and len(clipped) > 1:
+            vrt = os.path.join(out_dir, "_stack.vrt")
+            gdal.BuildVRT(vrt, [clipped[k] for k in sorted(clipped)], separate=True)
+            stacked = os.path.join(out_dir, base + "_stack_clip.tif")
+            gdal.Translate(stacked, vrt, creationOptions=co)
+            os.remove(vrt)
+            report.append(f"Stacked: {os.path.basename(stacked)} (bands "
+                          + ", ".join(f"B{k}" for k in sorted(clipped)) + ")")
 
-    msg = f"Clipped {len(outs)} band(s) -> {clip_dir}"
-    if stack and len(outs) > 1:
-        vrt = os.path.join(clip_dir, "_stack.vrt")
-        gdal.BuildVRT(vrt, outs, separate=True)
-        stacked = os.path.join(clip_dir, base + "_stack_clip.tif")
-        gdal.Translate(stacked, vrt, creationOptions=co)
-        os.remove(vrt)
-        msg += f"; stacked: {os.path.basename(stacked)} (band order: " \
-               + ", ".join(os.path.basename(o).replace("_clip.tif", "") for o in outs) + ")"
-    if skipped:
-        msg += f"; no overlap: {', '.join(skipped)}"
-    if not keep_full:
-        if unpacked:
-            shutil.rmtree(ex_dir, ignore_errors=True)
-        if not path.lower().endswith(RASTER_EXT):
+    # 3) composites
+    for kind in composites:
+        if not all(k in work for k in (2, 3, 4)):
+            report.append(f"{kind} skipped: bands 2, 3 and 4 not all found")
+            continue
+        name = f"{base}_{kind}{'_clip' if clip else ''}.tif"
+        try:
+            make_composite(work, os.path.join(out_dir, name), kind)
+            report.append(f"{kind}: {name}")
+        except Exception as e:
+            report.append(f"{kind} failed: {e}")
+
+    # 4) tidy up
+    if is_archive and not keep_zip and os.path.isdir(ex_dir):
+        try:
             os.remove(path)
-        msg += "; full scene deleted"
-    return msg
+            report.append("ZIP deleted")
+        except OSError as e:
+            report.append(f"Could not delete ZIP: {e}")
+    if clip and not keep_full and os.path.isdir(ex_dir) \
+            and os.path.normcase(ex_dir) != os.path.normcase(folder):
+        shutil.rmtree(ex_dir, ignore_errors=True)
+        report.append("Unzipped full scene deleted (clipped files kept)")
+    if not os.path.exists(path):
+        # ZIP/folder is gone: remember what is left so the scene is not downloaded again
+        keep = ex_dir if os.path.isdir(ex_dir) else out_dir
+        with INDEX_LOCK:
+            idx = load_index(folder)
+            for sid_, pth in list(idx.items()):
+                if os.path.normcase(pth) == os.path.normcase(path):
+                    idx[sid_] = keep
+            try:
+                with open(os.path.join(folder, INDEX_FILE), "w") as fh:
+                    json.dump(idx, fh, indent=1)
+            except OSError:
+                pass
+    return "; ".join(report) if report else "Nothing to do."
 
 
 # ---------------- Compare viewer ----------------
@@ -868,27 +1103,29 @@ def geom_bounds(geom):
 
 
 def local_raster(out_dir, scene_id):
-    """Best local raster for a scene: stacked clip > clipped bands > full-scene bands."""
+    """Best local raster for a scene: stacked clip > clipped bands > full-scene bands.
+    Works whether or not the ZIP / full scene was deleted after processing."""
     p = find_existing(out_dir, scene_id)
     if not p:
         return None
     folder = os.path.dirname(p)
-    base = re.sub(r"\.(zip|tar\.gz|tgz|tar)$", "", os.path.basename(p), flags=re.I)
-    stack = glob.glob(os.path.join(folder, base + "_clip", "*_stack_clip.tif"))
+    base = re.sub(r"(\.(zip|tar\.gz|tgz|tar)|_clip)$", "", os.path.basename(p), flags=re.I)
+    clip_dir, full_dir = os.path.join(folder, base + "_clip"), os.path.join(folder, base)
+    stack = glob.glob(os.path.join(clip_dir, "*_stack_clip.tif"))
     if stack:
         return stack[0]
-    bands = sorted(glob.glob(os.path.join(folder, base + "_clip", "*_clip.tif")))
-    if not bands:
-        bands = sorted(os.path.join(r, n) for r, _, fs in os.walk(os.path.join(folder, base))
-                       for n in fs if n.lower().endswith(RASTER_EXT))
-    if not bands:
-        return None
-    if len(bands) == 1:
-        return bands[0]
-    from osgeo import gdal
-    vrt = os.path.join(tempfile.gettempdir(), f"{scene_id}_view.vrt")
-    gdal.BuildVRT(vrt, bands[:4], separate=True)
-    return vrt
+    for d in (clip_dir, full_dir):
+        files = [os.path.join(r, n) for r, _, fs in os.walk(d) for n in fs
+                 if n.lower().endswith(RASTER_EXT) and not re.search(r"_(FCC|TCC|stack)", n, re.I)]
+        bands = find_bands(files)
+        if all(k in bands for k in (2, 3, 4)):
+            from osgeo import gdal
+            vrt = os.path.join(tempfile.gettempdir(), f"{scene_id}_view.vrt")
+            gdal.BuildVRT(vrt, [bands[k] for k in (2, 3, 4)], separate=True)
+            return vrt
+        if files:
+            return sorted(files)[0]
+    return None
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
@@ -1002,7 +1239,7 @@ def show_map(aoi_geom, feats, bounds):
 
 
 # ================= UI =================
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 REPO_URL = "https://github.com/anurag-tm/Bhoonidhi-Downloader"
 st.title("🛰️ Bhoonidhi Downloader")
 st.caption(f"Search, preview, download and clip Resourcesat LISS-IV data from NRSC Bhoonidhi · "
@@ -1352,29 +1589,20 @@ if ss.feats:
                 st.info("Bhoonidhi gave no quick-look for some scenes. Open 'Raw properties' below "
                         "to check the 'assets' links, or report it on the GitHub Issues page.")
 
-        st.subheader("5. Download & clip")
-        has_gdal = gdal_available()
-        c1, c2, c3, c4 = st.columns(4)
-        do_clip = c1.checkbox("Unzip and clip to AOI (GDAL)", value=has_gdal and CFG.get("clip", True),
-                              disabled=not has_gdal)
-        do_stack = c2.checkbox("Stack clipped bands into one GeoTIFF", value=CFG.get("stack", True),
-                               disabled=not do_clip)
-        keep_full = c3.checkbox("Keep full scene after clipping", value=CFG.get("keep_full", True),
-                                disabled=not do_clip)
-        n_par = c4.number_input("Parallel downloads", min_value=1, max_value=5,
+        st.subheader("5. Download & process")
+        n_par = st.number_input("Parallel downloads", min_value=1, max_value=5,
                                 value=int(CFG.get("parallel", 4)), step=1,
                                 help="How many scenes download at the same time. "
                                      "Bhoonidhi allows max 5. Use 1-2 on slow internet.")
-        save_settings(out_dir=out_dir, stack=bool(do_stack), keep_full=bool(keep_full),
-                      parallel=int(n_par), **({"clip": bool(do_clip)} if has_gdal else {}))
-        if not has_gdal:
-            st.caption("Clipping needs GDAL: conda install -c conda-forge gdal (then restart the app).")
-        st.caption("The Bhoonidhi API only serves full scenes, so the full scene is downloaded "
-                   "first and clipped on your PC. Your choices here are remembered next time.")
+        save_settings(out_dir=out_dir, parallel=int(n_par))
+        st.markdown("**After download**")
+        opts = processing_options("dl", gdal_available())
+        st.caption("Step 1 downloads all ticked scenes. Step 2 starts when all downloads are done "
+                   "and unzips / clips / makes composites. The Bhoonidhi API only serves full "
+                   "scenes, so clipping happens on your PC. Your choices are remembered.")
 
         if st.button(f"⬇️ Download {len(chosen)} scene(s)", disabled=not chosen):
-            run_downloads([by_id_all[sid] for sid in chosen], out_dir, int(n_par),
-                          do_clip, do_stack, keep_full, ss.aoi[0])
+            run_downloads([by_id_all[sid] for sid in chosen], out_dir, int(n_par), opts, ss.aoi[0])
     else:
         st.warning("No scenes left after the cloud filter. Raise the cloud limit "
                    "or tick 'Keep scenes with no cloud value'.")
@@ -1383,3 +1611,26 @@ if ss.feats:
         f0 = ss.feats[0]
         st.json({"properties": f0.get("properties", {}), "assets": f0.get("assets", {}),
                  "links": f0.get("links", [])})
+
+
+# --- Process ZIPs already on this PC ---
+st.divider()
+st.subheader("6. Process ZIP files already on your PC")
+st.caption("Unzip, clip and make FCC / TCC for LISS-IV ZIPs you downloaded earlier (any source). "
+           "No login needed. ZIPs already processed with the same settings are skipped.")
+with st.expander("Open", expanded=False):
+    zfolder = st.text_input("Folder with the ZIP files",
+                            value=CFG.get("zip_folder", CFG.get("out_dir", os.path.join(os.getcwd(),
+                                                                                       "liss4_downloads"))),
+                            key="zip_folder")
+    if os.path.isdir(zfolder):
+        n_zip = len([f for f in os.listdir(zfolder) if f.lower().endswith((".zip", ".tar.gz", ".tgz"))])
+        st.caption(f"{n_zip} ZIP file(s) found in this folder.")
+        save_settings(zip_folder=zfolder)
+    else:
+        st.caption("Folder not found.")
+    if aoi_geom is None:
+        st.caption("Set an area in section 1 if you want to clip; otherwise full scenes are used.")
+    fopts = processing_options("folder", gdal_available(), aoi_ok=aoi_geom is not None)
+    if st.button("⚙️ Process ZIP files", disabled=not (fopts and os.path.isdir(zfolder))):
+        run_folder_processing(zfolder, fopts, aoi_geom)

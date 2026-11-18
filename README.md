@@ -18,7 +18,8 @@ You pick an area and dates, the app finds the scenes, shows you quick-look previ
 - **Results table** showing location (path / row / subscene), how much of your area each scene covers, cloud %, and date.
 - **Compare window.** 2–4 scenes of the same location side by side; all windows zoom and pan together. Works *before* downloading, using quick-looks.
 - **Fast downloads.** 1–5 scenes at the same time (default 4), with automatic retry and **resume** if the internet drops.
-- **Unzip + clip with GDAL.** Every band is clipped to your area, with an optional stacked GeoTIFF.
+- **After download, your choice:** keep the ZIP only, or unzip, then optionally clip to your area, stack the bands, and make an **FCC** (false colour) and/or **TCC** (true colour). Keep or delete the ZIP afterwards. Processing starts when all downloads are finished.
+- **Process old ZIPs too:** point the app at a folder of LISS-IV ZIPs already on your PC and it unzips them and makes FCC/TCC in one click. Already-done files are skipped.
 - **Stays logged in.** The token is refreshed every 18 min (also while idle), page reloads keep you logged in, and an optional "Remember me on this PC" setting logs you in when the app starts.
 - **Never lose your work.** Your last shapefile, area, dates, filters and search results come back automatically after the PC sleeps, the browser disconnects or the app restarts. Download settings are remembered too.
 
@@ -108,23 +109,39 @@ It logs in, lists a few scenes and logs out. If you see *"Everything works"*, th
 | **2. Filters** | Pick **Start date** and **End date**, the collections (LISS-IV by default) and the **max cloud cover %**. Click **🔍 Search**. |
 | **3. Results** | Each scene shows its **Location** (path / row / subscene), **AOI covered %** and **Cloud %**. Choose scenes with **100 % AOI covered**, and tick the ones you want. |
 | **4. Compare** *(optional)* | Pick a **Location**, then 2–4 dates. Choose *Quick-look* to preview before downloading, and turn on **Open comparison viewer**. Pan or zoom one window and the others follow. |
-| **5. Download & clip** | Check the **download folder**. Tick *Unzip and clip to AOI* to get only your area, optionally *Stack bands*. Set **Parallel downloads** (1–5). Click **⬇️ Download**. |
+| **5. Download & process** | Check the **download folder** and **Parallel downloads** (1–5). Under **After download** choose: *Unzip* (off = ZIP only), *Clip to my AOI* (off = full scene), *Stack bands*, *Make FCC*, *Make TCC*, *Keep / Delete* the ZIP, and *Keep the unzipped full scene*. Click **⬇️ Download**. Step 1 downloads everything; step 2 does the processing. |
+| **6. Process ZIP files already on your PC** *(optional)* | Enter the folder with your ZIPs, choose the same options, and click **⚙️ Process ZIP files**. No login needed. |
 | **Finish** | Click **Logout** in the sidebar, then close the black window. |
 
 ### Where your files go
 
 ```
 liss4_downloads/
-├── <scene>.zip                  full scene as downloaded
+├── <scene>.zip                  full scene as downloaded (removed if "Delete" is chosen)
 ├── <scene>/                     unzipped full scene
-└── <scene>_clip/
+├── <scene>_FCC.tif              full-scene composites (when "Clip" is off)
+├── <scene>_TCC.tif
+└── <scene>_clip/                (when "Clip" is on)
     ├── BAND2_clip.tif           each band clipped to your area
     ├── BAND3_clip.tif
     ├── BAND4_clip.tif
-    └── <scene>_stack_clip.tif   all bands in one file (if "Stack" is ticked)
+    ├── <scene>_stack_clip.tif   all bands in one file (if "Stack" is ticked)
+    ├── <scene>_FCC_clip.tif     clipped false colour
+    └── <scene>_TCC_clip.tif     clipped true colour
 ```
 
-Untick *"Keep full scene after clipping"* to save disk space; only the clipped files are kept.
+Composites are 8-bit RGB GeoTIFFs (2–98 % stretch, 0 = no data, with overviews), ready for QGIS or ArcGIS.
+
+### FCC and TCC: how they are made
+
+LISS-IV has three bands: **B2 Green, B3 Red, B4 NIR**. There is **no blue band**.
+
+| Composite | Red | Green | Blue |
+|---|---|---|---|
+| **FCC** (standard false colour) | NIR (B4) | Red (B3) | Green (B2) |
+| **TCC** (simulated true colour) | Red (B3) | (3·Green + NIR) / 4 | (3·Green − NIR) / 4 |
+
+Because the blue band is missing, the TCC is a *simulated* natural colour. It uses the band combination long used for SPOT, which has the same three bands ([CRISP, NUS: Interpretation of optical images](https://crisp.nus.edu.sg/~research/tutorial/opt_int.htm)). Vegetation looks green and water blue, but colours are approximate. More advanced methods predict the blue band with a regression model ([ISPRS Archives XLII-5, 2018](https://isprs-archives.copernicus.org/articles/XLII-5/643/2018/)).
 
 ---
 
@@ -147,6 +164,7 @@ Untick *"Keep full scene after clipping"* to save disk space; only the clipped f
 | `403` Max sessions | Too many open sessions. Log out on the Bhoonidhi website and wait a few minutes. |
 | `404` / *No scenes found* | Widen the dates or the area, or untick *"Online scenes only"*. |
 | `412` Too many downloads | Lower *Parallel downloads* to 3 or less. |
+| *FCC/TCC skipped: bands 2, 3 and 4 not all found* | The ZIP is not a LISS-IV multispectral product (e.g. LISS-III has B5 too, which is fine; PAN has one band). |
 | `429` Rate limit | Wait ~1 hour (too many logins or searches). |
 | *Clipping needs GDAL* | Run `install_windows.bat` again, or `conda install -c conda-forge gdal`. |
 | *Remember me* is greyed out | `conda install -c conda-forge keyring`, then restart the app. |
