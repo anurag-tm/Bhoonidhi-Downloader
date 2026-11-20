@@ -13,4 +13,5 @@ dependencies:
   - shapely>=2
   - pyproj
   - gdal
+  - libgdal-jp2openjpeg   # reads Sentinel-2 JPEG2000 bands
   - keyring
