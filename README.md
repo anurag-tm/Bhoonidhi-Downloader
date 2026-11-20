@@ -2,6 +2,8 @@
 
 A simple app to **search, preview, download and clip ISRO Resourcesat satellite data (LISS-IV, LISS-III, AWiFS)** from the NRSC **Bhoonidhi** API — no coding needed.
 
+> **This is the `usgs` branch.** Besides Bhoonidhi, it adds a **USGS** page for Landsat 1–9 and every other USGS EarthExplorer dataset. See [USGS page](#usgs-page) below. The stable Bhoonidhi-only version is on the `main` branch.
+
 You pick an area and dates, the app finds the scenes, shows you quick-look previews side by side, downloads the ones you choose (4 at a time) and clips them to your area.
 
 ![App screenshot](docs/screenshot.png)
@@ -167,6 +169,7 @@ Because the blue band is missing, the TCC is a *simulated* natural colour. It us
 | *FCC/TCC skipped: bands 2, 3 and 4 not all found* | The ZIP is not a LISS-IV multispectral product (e.g. LISS-III has B5 too, which is fine; PAN has one band). |
 | `429` Rate limit | Wait ~1 hour (too many logins or searches). |
 | *Clipping needs GDAL* | Run `install_windows.bat` again, or `conda install -c conda-forge gdal`. |
+| USGS: *AUTH_INVALID* or *AUTH_UNAUTHORIZED* | Use the **application token**, not your password, and check that M2M access is approved in your ERS profile. |
 | *Remember me* is greyed out | `conda install -c conda-forge keyring`, then restart the app. |
 | Streamlit asks for an email | Press **Enter** (leave it blank). |
 | Logged out after a reload | Update to the latest version. Login now survives page reloads. |
@@ -188,6 +191,35 @@ Download the new ZIP (or run `git pull`), replace the old files, then run `insta
 - With *"Remember me on this PC"* it is saved in **Windows Credential Manager** (or the macOS Keychain), never in a text file. *"Logout and forget me on this PC"* removes it.
 - `bhoonidhi_settings.json` (options), `bhoonidhi_last_aoi.json` (your last uploaded area) and `bhoonidhi_last_search.json` (last results) are saved in the app folder on your PC. They never contain your password and are never uploaded anywhere. Delete them to start fresh.
 - The app talks only to Bhoonidhi (`bhoonidhi.nrsc.gov.in`) and loads the basemap for the Compare window.
+
+---
+
+## USGS page
+
+Open the app as usual, then click **USGS** in the left menu.
+
+### One-time setup (free)
+
+1. Create a USGS account at <https://ers.cr.usgs.gov/register>.
+2. In your ERS profile, open **Access Request** and ask for **Machine-to-Machine (M2M)** access. Approval can take a few days.
+3. Create an **Application Token** in your ERS profile ([USGS guide](https://www.usgs.gov/media/files/m2m-application-token-documentation)).
+4. On the USGS page sidebar, enter your **username** and the **token** (not your password). Tick *Remember me* to save it in Windows Credential Manager.
+
+### How to use
+
+| Step | What to do |
+|---|---|
+| **1. Area** | Point + radius/square, bounding box, or shapefile (your last file is remembered). |
+| **2. Data** | Pick a Landsat dataset: 8–9 OLI/TIRS, 7 ETM+, 4–5 TM (Level-1 or Level-2), or 1–5 MSS. Or choose **Other USGS dataset…**, type a word (e.g. *aster*, *srtm*, *declass*) and pick from the list. Set dates (from 1972) and max cloud cover, then **Search**. |
+| **3. Results** | Each scene shows date, **WRS path/row**, % of your area covered and cloud %. Filter by path/row, tick scenes, and optionally show previews. |
+| **4. Download & process** | Choose **Full product** (one .tar with all bands) or **Only the bands I choose** (smaller and faster; the default is exactly the bands the products need). Then: unpack, clip to your area, make **TCC, FCC, SWIR, NDVI, NDSI, NDWI**, optional band stack, keep/delete the archive. Up to 6 downloads at once, with resume. |
+
+Notes:
+
+- Level-2 values are converted to **surface reflectance** (DN × 0.0000275 − 0.2) before NDVI / NDSI / NDWI.
+- Band combinations are chosen automatically per sensor (OLI vs TM/ETM+ vs MSS).
+- If USGS needs time to prepare a file, the app waits and continues by itself.
+- Non-Landsat datasets are unpacked and clipped; products like TCC/NDVI are for Landsat.
 
 ---
 

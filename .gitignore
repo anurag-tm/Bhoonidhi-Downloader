@@ -16,3 +16,12 @@ venv/
 bhoonidhi_last_aoi.json
 bhoonidhi_last_search.json
 *.tmp
+
+# Copernicus / USGS pages
+*_settings.json
+*_last_aoi.json
+*_last_search.json
+copernicus_downloads/
+usgs_downloads/
+*.jp2
+*.SAFE/
